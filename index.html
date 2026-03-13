@@ -972,6 +972,7 @@ var MONDAY_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJ0aWQiOjYyNzA3NzcxOSwiYWFpIjoxMSwidWl
 var BOARD_ID = '18402821844';
 var SOURCE_GROUP = 'group_mm16qcxp';
 var DEST_GROUP = 'group_mm16ennm';
+var RO_ARRIVAL_COL = 'text_mm1db43';  // "RO Completed" column — stamp arrival time
 
 var OPERATORS = {
   '4821': 'Josh',
@@ -1059,6 +1060,15 @@ function loadBatches() {
 
 function moveBatchToDest(batchId) {
   var mutation = 'mutation { move_item_to_group(item_id: ' + batchId + ', group_id: "' + DEST_GROUP + '") { id } }';
+  return mondayQuery(mutation);
+}
+
+function stampROArrival(batchId) {
+  var now = new Date();
+  var stamp = now.toISOString();
+  var colVals = JSON.stringify({ "text_mm1db43": stamp });
+  var escaped = colVals.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  var mutation = 'mutation { change_multiple_column_values(board_id: ' + BOARD_ID + ', item_id: ' + batchId + ', column_values: "' + escaped + '") { id } }';
   return mondayQuery(mutation);
 }
 
@@ -1218,7 +1228,9 @@ function handleTankEmpty(isEmpty) {
     document.getElementById('modal-tank').classList.remove('active');
     setStatus('loading', 'Moving all batches to Pre-RO System...');
 
-    var promises = state.batches.map(function(b) { return moveBatchToDest(b.id); });
+    var promises = state.batches.map(function(b) {
+      return Promise.all([moveBatchToDest(b.id), stampROArrival(b.id)]);
+    });
 
     Promise.all(promises).then(function() {
       var last = state.sessionLogs[state.sessionLogs.length - 1];
@@ -1285,7 +1297,9 @@ function confirmBatchCount() {
   setStatus('loading', 'Moving ' + selectedCount + ' batch(es)...');
 
   var toMove = state.batches.slice(0, selectedCount);
-  var promises = toMove.map(function(b) { return moveBatchToDest(b.id); });
+  var promises = toMove.map(function(b) {
+    return Promise.all([moveBatchToDest(b.id), stampROArrival(b.id)]);
+  });
 
   Promise.all(promises).then(function() {
     var last = state.sessionLogs[state.sessionLogs.length - 1];
