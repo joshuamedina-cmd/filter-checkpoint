@@ -1133,8 +1133,9 @@ function renderControl() {
         '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>' +
         'Start Filter' +
       '</button>';
+
   } else {
-    container.innerHTML = '<div class="empty-state" style="padding:16px;">No batches available to run</div>';
+    container.innerHTML = '<div class="empty-state" style="padding:16px;">No batches in queue</div>';
   }
 }
 
@@ -1146,18 +1147,16 @@ function renderLog() {
     return;
   }
 
-  var html = '<div class="log-table-wrapper"><table class="log-table"><thead><tr>' +
-    '<th>Batch</th><th>Started</th><th>Stopped</th><th>Duration</th><th>Moved</th>' +
-    '</tr></thead><tbody>';
+  var html = '<div class="log-table-wrapper"><table class="log-table"><thead><tr><th>Batch</th><th>Started</th><th>Stopped</th><th>Duration</th><th>Moved</th></tr></thead><tbody>';
 
   state.sessionLogs.forEach(function(log) {
     html += '<tr>' +
       '<td><strong>' + escapeHtml(log.batchName) + '</strong></td>' +
-      '<td>' + formatTimeShort(log.startTime) + '</td>' +
-      '<td>' + formatTimeShort(log.stopTime) + '</td>' +
+      '<td>' + formatTime(log.startTime) + '</td>' +
+      '<td>' + formatTime(log.stopTime) + '</td>' +
       '<td>' + log.duration + '</td>' +
-      '<td>' + (log.moved ? '<span class="badge-moved">Pre-RO System</span>' : '-') + '</td>' +
-      '</tr>';
+      '<td>' + (log.moved ? '<span class="badge-moved">' + log.destLabel + '</span>' : '—') + '</td>' +
+    '</tr>';
   });
 
   html += '</tbody></table></div>';
@@ -1165,14 +1164,12 @@ function renderLog() {
 }
 
 /* ===========================
-   FILTER ACTIONS
+   PROCESS ACTIONS
    =========================== */
 function startProcess() {
-  if (state.batches.length === 0 || state.runningBatch) return;
-
+  if (state.runningBatch || state.batches.length === 0) return;
   state.runningBatch = state.batches[0];
   state.runStartTime = new Date();
-
   renderQueue();
   renderControl();
   setStatus('running', 'Running: ' + (state.runningBatch.batchName || state.runningBatch.name));
@@ -1181,147 +1178,135 @@ function startProcess() {
 
 function stopProcess() {
   if (!state.runningBatch) return;
-
   stopTimer();
   var stopTime = new Date();
-  var duration = formatDuration(state.runStartTime, stopTime);
-
-  state.sessionLogs.push({
-    batchName: state.runningBatch.batchName || state.runningBatch.name,
+  var logEntry = {
     batchId: state.runningBatch.id,
+    batchName: state.runningBatch.batchName || state.runningBatch.name,
     operator: state.currentOperator,
     startTime: state.runStartTime,
     stopTime: stopTime,
-    duration: duration,
-    moved: false
-  });
-
-  showTankEmptyModal();
+    duration: formatDuration(state.runStartTime, stopTime),
+    moved: false,
+    destLabel: ''
+  };
+  state.sessionLogs.push(logEntry);
+  showTankCompleteModal(logEntry);
 }
 
-function showTankEmptyModal() {
-  var titleEl = document.getElementById('modalTitle');
-  var subtitleEl = document.getElementById('modalSubtitle');
-  var bodyEl = document.getElementById('modalBody');
+function showTankCompleteModal(logEntry) {
+  var modal = document.getElementById('modal-tank');
+  var title = document.getElementById('modalTitle');
+  var subtitle = document.getElementById('modalSubtitle');
+  var body = document.getElementById('modalBody');
 
-  titleEl.textContent = 'Is the Filter Complete?';
-  subtitleEl.textContent = 'Has the entire filter tank been fully processed?';
+  title.textContent = 'Is the Filter Complete?';
+  subtitle.textContent = 'Has the entire filter batch been fully processed through the RO system?';
 
-  bodyEl.innerHTML =
+  body.innerHTML =
     '<div class="modal-buttons">' +
-      '<button class="btn btn-green" style="width:100%;min-height:52px;font-size:15px;" onclick="handleTankEmpty(true)">' +
-        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>' +
-        'Yes, Tank is Empty' +
-      '</button>' +
-      '<button class="btn btn-orange" style="width:100%;min-height:52px;font-size:15px;" onclick="handleTankEmpty(false)">' +
-        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>' +
-        'No, Tank Still Has Material' +
-      '</button>' +
+      '<button class="btn btn-green btn-full" onclick="handleFilterComplete(true)">YES — Move to RO System</button>' +
+      '<button class="btn btn-orange btn-full" onclick="handleFilterComplete(false)">NO — Partial Run</button>' +
     '</div>';
 
-  document.getElementById('modal-tank').classList.add('active');
+  modal.classList.add('active');
 }
 
-var selectedCount = 1;
+async function handleFilterComplete(isComplete) {
+  var modal = document.getElementById('modal-tank');
 
-function handleTankEmpty(isEmpty) {
-  if (isEmpty) {
-    document.getElementById('modal-tank').classList.remove('active');
-    setStatus('loading', 'Moving all batches to Pre-RO System...');
+  if (isComplete) {
+    modal.classList.remove('active');
+    setStatus('loading', 'Moving all batches to RO System...');
 
-    var promises = state.batches.map(function(b) {
-      return Promise.all([moveBatchToDest(b.id), stampROArrival(b.id)]);
-    });
-
-    Promise.all(promises).then(function() {
-      var last = state.sessionLogs[state.sessionLogs.length - 1];
-      last.moved = true;
-      last.movedCount = state.batches.length;
-
-      showToast('All ' + state.batches.length + ' batch(es) moved to Pre-RO System');
-
+    try {
+      for (var i = 0; i < state.batches.length; i++) {
+        await moveBatchToDest(state.batches[i].id);
+        await stampROArrival(state.batches[i].id);
+      }
+      var lastLog = state.sessionLogs[state.sessionLogs.length - 1];
+      lastLog.moved = true;
+      lastLog.destLabel = 'RO System';
+      showToast('All ' + state.batches.length + ' batch(es) moved to RO System');
       state.runningBatch = null;
       state.runStartTime = null;
-      return loadBatches();
-    }).then(function() {
+      await loadBatches();
       renderControl();
       renderLog();
-    }).catch(function(err) {
+    } catch(err) {
       console.error(err);
-      setStatus('loading', 'Error moving batches');
-    });
+      setStatus('error', 'Failed to move');
+      showToast('Error moving batches');
+    }
 
   } else {
-    showBatchCountModal();
+    showPartialModal();
   }
 }
 
-function showBatchCountModal() {
-  var titleEl = document.getElementById('modalTitle');
-  var subtitleEl = document.getElementById('modalSubtitle');
-  var bodyEl = document.getElementById('modalBody');
+function showPartialModal() {
+  var title = document.getElementById('modalTitle');
+  var subtitle = document.getElementById('modalSubtitle');
+  var body = document.getElementById('modalBody');
 
-  selectedCount = 1;
-  var max = state.batches.length;
+  var maxBatches = state.batches.length;
+  var selectedCount = 1;
 
-  titleEl.textContent = 'How Many Batches Processed?';
-  subtitleEl.textContent = 'Estimate how many batches went through the filter. They will be moved to Pre-RO System in order.';
+  title.textContent = 'How Many Batches Processed?';
+  subtitle.textContent = 'Select how many batches to move to RO System (' + maxBatches + ' in queue)';
 
-  function renderCounterUI() {
-    bodyEl.innerHTML =
+  function renderCounter() {
+    body.innerHTML =
       '<div class="batch-counter">' +
-        '<button class="counter-btn" onclick="adjustCount(-1)">-</button>' +
-        '<span class="counter-value" id="countVal">' + selectedCount + '</span>' +
-        '<button class="counter-btn" onclick="adjustCount(1)">+</button>' +
+        '<button class="counter-btn" onclick="adjustBatchCount(-1)">−</button>' +
+        '<div class="counter-value" id="batchCountDisplay">' + selectedCount + '</div>' +
+        '<button class="counter-btn" onclick="adjustBatchCount(1)">+</button>' +
       '</div>' +
-      '<div class="counter-hint">Will move the first <strong>' + selectedCount + '</strong> of ' + max + ' batch' + (max !== 1 ? 'es' : '') + ' to Pre-RO System</div>' +
+      '<div class="counter-hint" id="batchCountHint">Will move the first ' + selectedCount + ' batch' + (selectedCount !== 1 ? 'es' : '') + ' to RO System</div>' +
       '<div class="modal-buttons">' +
-        '<button class="btn btn-green" style="width:100%;min-height:52px;font-size:15px;" onclick="confirmBatchCount()">' +
-          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>' +
-          'Confirm &amp; Move' +
-        '</button>' +
-        '<button class="btn btn-secondary" style="width:100%;min-height:44px;" onclick="closeTankModal()">Cancel</button>' +
+        '<button class="btn btn-green btn-full" onclick="confirmPartialMove(' + selectedCount + ')">Confirm &amp; Move</button>' +
+        '<button class="btn btn-secondary btn-full" onclick="cancelMove()">Cancel</button>' +
       '</div>';
   }
 
-  window.adjustCount = function(delta) {
-    selectedCount = Math.max(1, Math.min(max, selectedCount + delta));
-    document.getElementById('countVal').textContent = selectedCount;
-    bodyEl.querySelector('.counter-hint').innerHTML = 'Will move the first <strong>' + selectedCount + '</strong> of ' + max + ' batch' + (max !== 1 ? 'es' : '') + ' to Pre-RO System';
+  window.adjustBatchCount = function(delta) {
+    selectedCount = Math.max(1, Math.min(maxBatches, selectedCount + delta));
+    document.getElementById('batchCountDisplay').textContent = selectedCount;
+    document.getElementById('batchCountHint').textContent = 'Will move the first ' + selectedCount + ' batch' + (selectedCount !== 1 ? 'es' : '') + ' to RO System';
+    body.querySelector('.btn-green').setAttribute('onclick', 'confirmPartialMove(' + selectedCount + ')');
   };
 
-  renderCounterUI();
+  renderCounter();
 }
 
-function confirmBatchCount() {
-  document.getElementById('modal-tank').classList.remove('active');
-  setStatus('loading', 'Moving ' + selectedCount + ' batch(es)...');
+async function confirmPartialMove(count) {
+  var modal = document.getElementById('modal-tank');
+  modal.classList.remove('active');
+  setStatus('loading', 'Moving ' + count + ' batch(es) to RO System...');
 
-  var toMove = state.batches.slice(0, selectedCount);
-  var promises = toMove.map(function(b) {
-    return Promise.all([moveBatchToDest(b.id), stampROArrival(b.id)]);
-  });
-
-  Promise.all(promises).then(function() {
-    var last = state.sessionLogs[state.sessionLogs.length - 1];
-    last.moved = true;
-    last.movedCount = selectedCount;
-
-    showToast(selectedCount + ' batch(es) moved to Pre-RO System');
-
+  try {
+    var toMove = state.batches.slice(0, count);
+    for (var i = 0; i < toMove.length; i++) {
+      await moveBatchToDest(toMove[i].id);
+      await stampROArrival(toMove[i].id);
+    }
+    var lastLog = state.sessionLogs[state.sessionLogs.length - 1];
+    lastLog.moved = true;
+    lastLog.destLabel = 'RO System';
+    showToast(count + ' batch(es) moved to RO System');
     state.runningBatch = null;
     state.runStartTime = null;
-    return loadBatches();
-  }).then(function() {
+    await loadBatches();
     renderControl();
     renderLog();
-  }).catch(function(err) {
+  } catch(err) {
     console.error(err);
-    setStatus('loading', 'Error moving batches');
-  });
+    setStatus('error', 'Failed to move');
+    showToast('Error moving batches');
+  }
 }
 
-function closeTankModal() {
+function cancelMove() {
   document.getElementById('modal-tank').classList.remove('active');
   state.runningBatch = null;
   state.runStartTime = null;
@@ -1341,7 +1326,10 @@ function startTimer() {
 }
 
 function stopTimer() {
-  if (state.timerInterval) { clearInterval(state.timerInterval); state.timerInterval = null; }
+  if (state.timerInterval) {
+    clearInterval(state.timerInterval);
+    state.timerInterval = null;
+  }
 }
 
 function updateTimer() {
@@ -1358,31 +1346,26 @@ function updateTimer() {
    AUTH
    =========================== */
 function handleLogin() {
-  var input = document.getElementById('operator-code');
-  var errorEl = document.getElementById('login-error');
-  var code = input.value.trim();
-
+  var code = document.getElementById('operator-code').value.trim().toUpperCase();
   if (OPERATORS[code]) {
-    errorEl.classList.remove('visible');
     state.currentOperator = OPERATORS[code];
     state.currentCode = code;
-
+    var initials = state.currentOperator.split(' ').map(function(w) { return w[0]; }).join('').slice(0,2).toUpperCase();
+    document.getElementById('operator-initials').textContent = initials;
     document.getElementById('operator-name-display').textContent = state.currentOperator;
-    document.getElementById('operator-initials').textContent = getInitials(state.currentOperator);
-
-    showScreen('screen-main');
+    document.getElementById('screen-login').classList.remove('active');
+    document.getElementById('screen-main').classList.add('active');
+    showToast('Welcome, ' + state.currentOperator + '!');
     loadBatches();
-    input.value = '';
   } else {
-    errorEl.classList.remove('visible');
-    void errorEl.offsetWidth;
-    errorEl.classList.add('visible');
-    input.value = '';
-    input.focus();
+    var err = document.getElementById('login-error');
+    err.classList.add('visible');
+    setTimeout(function() { err.classList.remove('visible'); }, 2500);
+    document.getElementById('operator-code').value = '';
   }
 }
 
-function handleLogout() {
+function logout() {
   stopTimer();
   state.currentOperator = null;
   state.currentCode = null;
@@ -1390,95 +1373,84 @@ function handleLogout() {
   state.runStartTime = null;
   state.batches = [];
   state.sessionLogs = [];
-  showScreen('screen-login');
+  document.getElementById('screen-main').classList.remove('active');
+  document.getElementById('screen-login').classList.add('active');
+  document.getElementById('operator-code').value = '';
   document.getElementById('operator-code').focus();
 }
 
 /* ===========================
-   HELPERS
+   STATUS
    =========================== */
-function showScreen(id) {
-  var screens = document.querySelectorAll('.screen');
-  for (var i = 0; i < screens.length; i++) screens[i].classList.remove('active');
-  document.getElementById(id).classList.add('active');
-}
-
 function setStatus(type, msg) {
   var chip = document.getElementById('statusChip');
   chip.className = 'status-chip ' + type;
   chip.innerHTML = type === 'loading'
-    ? '<span class="spinner"></span><span>' + msg + '</span>'
+    ? '<div class="spinner"></div><span>' + msg + '</span>'
     : '<span>' + msg + '</span>';
 }
 
+/* ===========================
+   TOAST
+   =========================== */
 function showToast(msg) {
   var toast = document.getElementById('toast');
   toast.textContent = msg;
   toast.classList.add('visible');
-  setTimeout(function() { toast.classList.remove('visible'); }, 2500);
-}
-
-function getInitials(name) {
-  return name.split(' ').map(function(p) { return p[0]; }).join('');
-}
-
-function formatDateTime(date) {
-  if (!date) return '';
-  var h = date.getHours(); var m = date.getMinutes(); var s = date.getSeconds();
-  var ampm = h >= 12 ? 'PM' : 'AM';
-  h = h % 12; if (h === 0) h = 12;
-  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return months[date.getMonth()] + ' ' + date.getDate() + ', ' +
-    h + ':' + (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s + ' ' + ampm;
-}
-
-function formatTimeShort(date) {
-  if (!date) return '';
-  var h = date.getHours(); var m = date.getMinutes();
-  var ampm = h >= 12 ? 'PM' : 'AM';
-  h = h % 12; if (h === 0) h = 12;
-  return h + ':' + (m < 10 ? '0' : '') + m + ' ' + ampm;
-}
-
-function formatDuration(start, end) {
-  var elapsed = Math.floor((end - start) / 1000);
-  var h = Math.floor(elapsed / 3600);
-  var m = Math.floor((elapsed % 3600) / 60);
-  var s = elapsed % 60;
-  if (h > 0) return h + 'h ' + m + 'm ' + s + 's';
-  if (m > 0) return m + 'm ' + s + 's';
-  return s + 's';
-}
-
-function escapeHtml(str) {
-  var div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+  setTimeout(function() { toast.classList.remove('visible'); }, 3000);
 }
 
 /* ===========================
-   EVENT LISTENERS
+   DATE/TIME HELPERS
+   =========================== */
+function formatDateTime(d) {
+  if (!d) return '';
+  return d.toLocaleDateString('en-US', {month:'short',day:'numeric'}) + ' ' +
+    d.toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true});
+}
+
+function formatTime(d) {
+  if (!d) return '';
+  return d.toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit',hour12:true});
+}
+
+function formatDuration(s, e) {
+  var secs = Math.floor((e - s) / 1000);
+  var h = Math.floor(secs / 3600);
+  var m = Math.floor((secs % 3600) / 60);
+  var sec = secs % 60;
+  if (h > 0) return h + 'h ' + m + 'm ' + sec + 's';
+  if (m > 0) return m + 'm ' + sec + 's';
+  return sec + 's';
+}
+
+function escapeHtml(str) {
+  var d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+/* ===========================
+   INIT
    =========================== */
 document.getElementById('login-btn').addEventListener('click', handleLogin);
 document.getElementById('operator-code').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') handleLogin();
 });
-
-// Auto-login on 4-char input
 document.getElementById('operator-code').addEventListener('input', function(e) {
   if (e.target.value.length === 4) handleLogin();
 });
-
-document.getElementById('logout-btn').addEventListener('click', handleLogout);
+document.getElementById('logout-btn').addEventListener('click', logout);
 document.getElementById('logout-btn').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter' || e.key === ' ') handleLogout();
+  if (e.key === 'Enter' || e.key === ' ') logout();
 });
 
 document.getElementById('modal-tank').addEventListener('click', function(e) {
-  if (e.target === this) closeTankModal();
+  if (e.target === this) cancelMove();
 });
 
 document.getElementById('operator-code').focus();
 </script>
+
 </body>
 </html>
